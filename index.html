@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>反指看板 · KOL 反向指标追踪器</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="scanlines"></div>
+
+<header class="hero">
+  <div class="hero-inner">
+    <h1 class="glitch" data-text="反指看板">反指看板</h1>
+    <p class="subtitle">KOL 反向指标追踪器 &nbsp;·&nbsp; <span class="en">REVERSE SIGNAL DASHBOARD</span></p>
+    <p class="tagline">「他喊多，你就空；他喊空，你就多。」—— 一条被市场反复验证的真理</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <!-- 统计卡片 -->
+  <section class="stats" id="stats">
+    <div class="card">
+      <div class="card-label">追踪信号</div>
+      <div class="card-value" id="stat-total">0</div>
+      <div class="card-sub">条喊单记录</div>
+    </div>
+    <div class="card star">
+      <div class="card-label">反指星级</div>
+      <div class="card-value" id="stat-stars">0 ★</div>
+      <div class="card-sub" id="stat-star-tier">尚未认证</div>
+    </div>
+    <div class="card red">
+      <div class="card-label">反向置信度</div>
+      <div class="card-value" id="stat-confidence">--%</div>
+      <div class="card-sub">按他反向操作的胜率</div>
+    </div>
+    <div class="card green">
+      <div class="card-label">实际正确率</div>
+      <div class="card-value" id="stat-winrate">--%</div>
+      <div class="card-sub">他自己的胜率</div>
+    </div>
+  </section>
+
+  <!-- 添加信号 -->
+  <section class="panel">
+    <h2>＋ 记录一次喊单</h2>
+    <form id="add-form" class="grid">
+      <label>大V / KOL 名
+        <input type="text" id="f-kol" placeholder="例如：冥灯" required />
+      </label>
+      <label>标的
+        <input type="text" id="f-asset" placeholder="BTC / ETH / 黄金 / 纳斯达克" required />
+      </label>
+      <label>方向
+        <select id="f-dir">
+          <option value="多">🔴 看多 / 买入</option>
+          <option value="空">🟢 看空 / 卖出</option>
+        </select>
+      </label>
+      <label>参考价（可选）
+        <input type="text" id="f-entry" placeholder="65000" />
+      </label>
+      <label class="full">备注 / 原话（可选）
+        <input type="text" id="f-note" placeholder="例如：发工资满仓做多 BTC" />
+      </label>
+      <div class="actions full">
+        <button type="submit" class="btn primary">录入并静候市场打脸</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 信号列表 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>📜 喊单档案</h2>
+      <div class="toolbar">
+        <select id="filter-kol"><option value="">全部 KOL</option></select>
+        <button class="btn ghost" id="btn-export">导出 JSON</button>
+        <button class="btn ghost" id="btn-import">导入 JSON</button>
+        <input type="file" id="file-import" accept="application/json" hidden />
+        <button class="btn danger" id="btn-clear">清空</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="signal-table">
+        <thead>
+          <tr>
+            <th>时间</th><th>KOL</th><th>标的</th><th>方向</th>
+            <th>参考价</th><th>结果</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="signal-body"></tbody>
+      </table>
+      <p class="empty" id="empty-hint">还没有记录。去上方录入第一条喊单，开始你的反指研究 👆</p>
+    </div>
+  </section>
+
+  <!-- 反指证书 -->
+  <section class="panel cert-panel">
+    <h2>🏅 生成反指证书</h2>
+    <p class="cert-desc">为某位 KOL 生成一张可截图分享的「反向指标认证证书」。</p>
+    <div class="cert-controls">
+      <select id="cert-kol"><option value="">选择 KOL</option></select>
+      <button class="btn primary" id="btn-cert">生成证书</button>
+    </div>
+    <div id="cert-output" class="cert hidden"></div>
+  </section>
+
+  <footer class="foot">
+    <p>本工具仅供娱乐与反讽研究，不构成任何投资建议。市场有风险，反向需谨慎。</p>
+    <p class="en">Reverse Signal Dashboard · MIT License · 打开即用，无需服务器</p>
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
