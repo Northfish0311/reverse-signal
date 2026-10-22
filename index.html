@@ -45,6 +45,11 @@
   <!-- 添加信号 -->
   <section class="panel">
     <h2>＋ 记录一次喊单</h2>
+    <div class="x-fetch">
+      <input type="text" id="x-url" placeholder="粘贴 X 推文链接，自动识别 KOL / 方向 / 标的" />
+      <button type="button" class="btn primary" id="btn-fetch-x">🔍 自动识别</button>
+      <span class="x-status" id="x-status"></span>
+    </div>
     <form id="add-form" class="grid">
       <label>大V / KOL 名
         <input type="text" id="f-kol" placeholder="例如：冥灯" required />
