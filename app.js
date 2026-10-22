@@ -111,6 +111,74 @@
     });
   }
 
+  /* ---------- X 链接自动识别 ---------- */
+  function extractTweetUrl(raw) {
+    var m = String(raw || "").match(/(?:https?:\/\/)?(?:x\.com|twitter\.com)\/([A-Za-z0-9_]+)\/status\/(\d+)/);
+    return m ? { user: m[1], id: m[2] } : null;
+  }
+  function detectDirection(text) {
+    var t = text || "";
+    var long = /做多|看多|多单|买入|抄底|加仓|看涨|暴涨|翻多|满仓|冲高/.test(t);
+    var short = /做空|看空|空单|卖出|清仓|止盈|看跌|暴跌|翻空|减仓|逃顶/.test(t);
+    if (long && !short) return "多";
+    if (short && !long) return "空";
+    return "未知";
+  }
+  function detectAsset(text) {
+    var t = text || "";
+    if (/BTC|比特币|大饼/i.test(t)) return "BTC";
+    if (/ETH|以太/i.test(t)) return "ETH";
+    if (/黄金|XAU/i.test(t)) return "黄金";
+    if (/纳指|纳斯达克|NAS100/i.test(t)) return "纳斯达克";
+    return "";
+  }
+  $("btn-fetch-x").addEventListener("click", function () {
+    var raw = $("x-url").value.trim();
+    var status = $("x-status");
+    if (!raw) { status.textContent = "请先粘贴 X 链接"; status.className = "x-status"; return; }
+    var parsed = extractTweetUrl(raw);
+    if (!parsed) { status.textContent = "链接格式不对，需要包含 x.com/作者/status/数字"; status.className = "x-status err"; return; }
+    status.textContent = "识别中…";
+    status.className = "x-status loading";
+    fetch("https://api.fxtwitter.com/" + parsed.user + "/status/" + parsed.id)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.code !== 200 || !data.tweet) throw new Error("bad");
+        var tw = data.tweet;
+        var kol = (tw.author && tw.author.screen_name) || parsed.user;
+        var text = tw.text || "";
+        var dir = detectDirection(text);
+        var asset = detectAsset(text);
+        $("f-kol").value = kol;
+        if (asset) $("f-asset").value = asset;
+        if (dir !== "未知") $("f-dir").value = dir;
+        $("f-note").value = text.slice(0, 120) + "  |  " + tw.url;
+        status.textContent = "已识别 @" + kol + " · " + (dir === "未知" ? "方向待确认" : ("看" + (dir === "多" ? "多" : "空"))) + (asset ? " · " + asset : "") + "，请核对后点「录入」";
+        status.className = "x-status ok";
+      })
+      .catch(function () {
+        status.textContent = "主接口失败，尝试备用接口…";
+        fetch("https://api.vxtwitter.com/" + parsed.user + "/status/" + parsed.id)
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            var kol = d.user_screen_name || d.user_name || parsed.user;
+            var text = d.text || "";
+            var dir = detectDirection(text);
+            var asset = detectAsset(text);
+            $("f-kol").value = kol;
+            if (asset) $("f-asset").value = asset;
+            if (dir !== "未知") $("f-dir").value = dir;
+            $("f-note").value = text.slice(0, 120) + "  |  " + d.tweetURL;
+            status.textContent = "已识别 @" + kol + "，请核对后点「录入」";
+            status.className = "x-status ok";
+          })
+          .catch(function () {
+            status.textContent = "识别失败，请检查链接或稍后再试";
+            status.className = "x-status err";
+          });
+      });
+  });
+
   /* ---------- 添加 ---------- */
   $("add-form").addEventListener("submit", function (e) {
     e.preventDefault();
