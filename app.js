@@ -1,289 +1,247 @@
-/* 反指看板 · KOL 反向指标追踪器
- * 纯前端，localStorage 存储，打开即用。 */
 (function () {
   "use strict";
-  var KEY = "reverse-signal:v1";
-  var signals = load();
+  const core = window.SignalCore;
+  const KEY = "reverse-signal:v1";
+  const $ = id => document.getElementById(id);
+  let signals = [], editId = null, storageBlocked = false, undoRecords = null;
+  let requestId = 0, controller = null, certKol = "";
 
-  /* ---------- 存储 ---------- */
-  function load() {
-    try { return JSON.parse(localStorage.getItem(KEY)) || []; }
-    catch (e) { return []; }
+  function notice(text, error = false) {
+    $("notice").textContent = text;
+    $("notice").className = error ? "notice error" : "notice";
+    $("notice").hidden = !text;
   }
-  function save() {
-    try { localStorage.setItem(KEY, JSON.stringify(signals)); } catch (e) {}
+  try {
+    const stored = localStorage.getItem(KEY);
+    if (stored !== null) signals = core.parseRecords(JSON.parse(stored));
+  } catch (error) {
+    storageBlocked = true;
+    notice("本地数据未能读取，原始数据没有改动。请先导出原始备份；修复备份后可清空并重新导入。原因：" + error.message, true);
   }
-
-  /* ---------- 工具 ---------- */
-  function $(id) { return document.getElementById(id); }
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  function persist(next, message) {
+    if (storageBlocked) { notice("本地数据异常，已停止写入以保护原始记录。请先导出原始备份。", true); return false; }
+    if (new Blob([backup(next)]).size > core.MAX_BACKUP_BYTES) {
+      notice("记录超过 2 MB 备份容量上限，本次修改未保存。请先导出备份，再整理旧记录。", true); return false;
+    }
+    try { localStorage.setItem(KEY, JSON.stringify(next)); }
+    catch (_) { notice("保存失败，原有记录未改动。请导出备份并检查浏览器存储权限或剩余空间。", true); return false; }
+    signals = next; notice(message); renderAll(); return true;
+  }
+  function node(tag, text, className) {
+    const el = document.createElement(tag);
+    if (text !== undefined) el.textContent = text;
+    if (className) el.className = className;
+    return el;
+  }
+  function percent(rate) { return rate === null ? "--" : Math.round(rate * 100) + "%"; }
+  function kolRecords() { const kol = $("filter-kol").value; return signals.filter(s => !kol || s.kol === kol); }
+  function visibleRecords() { const result = $("filter-result").value; return kolRecords().filter(s => !result || s.result === result); }
+  function refreshSelectors() {
+    const kols = [...new Set(signals.map(s => s.kol))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+    ["filter-kol", "cert-kol"].forEach(id => {
+      const select = $(id), value = select.value;
+      select.replaceChildren(new Option(id === "filter-kol" ? "全部 KOL" : "选择 KOL", ""));
+      kols.forEach(kol => select.add(new Option(kol, kol)));
+      if (kols.includes(value)) select.value = value;
     });
   }
-  function nowStr() {
-    var d = new Date();
-    var p = function (n) { return (n < 10 ? "0" : "") + n; };
-    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
-           " " + p(d.getHours()) + ":" + p(d.getMinutes());
-  }
-
-  /* ---------- 反指计算 ---------- */
-  // result: "win"=他赢了(你反向就亏) / "lose"=他亏了(你反向就赚) / "pending"
-  function compute(kol) {
-    var list = kol ? signals.filter(function (s) { return s.kol === kol; }) : signals;
-    var total = list.length;
-    var decided = list.filter(function (s) { return s.result !== "pending"; });
-    var loses = decided.filter(function (s) { return s.result === "lose"; }).length; // 他错的次数
-    var wins = decided.filter(function (s) { return s.result === "win"; }).length;
-    var wrongRate = decided.length ? loses / decided.length : 0; // 他错的概率 = 反向胜率
-    var winRate = decided.length ? wins / decided.length : 0;
-    var stars = decided.length ? Math.min(18, Math.round(wrongRate * 20)) : 0;
-    return {
-      total: total, decided: decided.length, loses: loses, wins: wins,
-      wrongRate: wrongRate, winRate: winRate, stars: stars,
-      confidence: Math.round(wrongRate * 100)
-    };
-  }
-  function tier(stars) {
-    if (stars === 0) return "尚未认证";
-    if (stars <= 2) return "疑似随机波动";
-    if (stars <= 5) return "初露反指锋芒";
-    if (stars <= 9) return "稳定反向输出";
-    if (stars <= 13) return "资深反向指标";
-    if (stars <= 17) return "殿堂级反指";
-    return "★ 十八星 · 历史级反指 ★";
-  }
-
-  /* ---------- 渲染统计 ---------- */
   function renderStats() {
-    var c = compute($("filter-kol").value);
+    const c = core.compute(kolRecords());
     $("stat-total").textContent = c.total;
-    $("stat-stars").textContent = c.stars + " ★";
-    $("stat-star-tier").textContent = tier(c.stars);
-    $("stat-confidence").textContent = c.decided ? c.confidence + "%" : "--%";
-    $("stat-winrate").textContent = c.decided ? Math.round(c.winRate * 100) + "%" : "--%";
+    $("stat-decided").textContent = "已验证 " + c.decided + " · 待验证 " + c.pending;
+    $("stat-stars").textContent = c.stars === null ? "--" : c.stars + " / 18";
+    $("stat-star-tier").textContent = c.stars === null ? "样本不足 " + core.MIN_SAMPLES + " 条" : "娱乐评分 · 非交易信号";
+    $("stat-confidence").textContent = percent(c.wrongRate);
+    $("stat-wrong-count").textContent = "判错 " + c.loses + " / 已验证 " + c.decided;
+    $("stat-winrate").textContent = percent(c.winRate);
+    $("stat-right-count").textContent = "判对 " + c.wins + " / 已验证 " + c.decided;
   }
-
-  /* ---------- 渲染列表 ---------- */
   function renderList() {
-    var kol = $("filter-kol").value;
-    var list = kol ? signals.filter(function (s) { return s.kol === kol; }) : signals;
-    list = list.slice().reverse();
-    var body = $("signal-body");
-    body.innerHTML = "";
-    $("empty-hint").style.display = list.length ? "none" : "block";
-    list.forEach(function (s) {
-      var tr = document.createElement("tr");
-      var tagClass = s.result === "win" ? "win" : s.result === "lose" ? "lose" : "pending";
-      var tagText = s.result === "win" ? "他赢" : s.result === "lose" ? "他亏(反指中)" : "待验证";
-      tr.innerHTML =
-        "<td>" + esc(s.time) + "</td>" +
-        "<td>" + esc(s.kol) + "</td>" +
-        "<td>" + esc(s.asset) + "</td>" +
-        '<td><span class="dir-' + esc(s.dir) + '">' + (s.dir === "多" ? "看多" : "看空") + "</span></td>" +
-        "<td>" + (s.entry ? esc(s.entry) : "—") + "</td>" +
-        '<td><span class="tag ' + tagClass + '" id="tag-' + s.id + '">' + tagText + "</span></td>" +
-        "<td>" +
-          '<button class="row-btn" data-act="win" data-id="' + s.id + '">他赢</button>' +
-          '<button class="row-btn" data-act="lose" data-id="' + s.id + '">他亏</button>' +
-          '<button class="row-btn" data-act="del" data-id="' + s.id + '">删</button>' +
-        "</td>";
-      body.appendChild(tr);
-    });
-  }
-
-  /* ---------- KOL 下拉刷新 ---------- */
-  function refreshKolSelectors() {
-    var kols = [];
-    signals.forEach(function (s) { if (kols.indexOf(s.kol) === -1) kols.push(s.kol); });
-    ["filter-kol", "cert-kol"].forEach(function (selId) {
-      var sel = $(selId);
-      var cur = sel.value;
-      sel.innerHTML = selId === "filter-kol"
-        ? '<option value="">全部 KOL</option>'
-        : '<option value="">选择 KOL</option>';
-      kols.forEach(function (k) {
-        var o = document.createElement("option");
-        o.value = k; o.textContent = k; sel.appendChild(o);
+    const list = visibleRecords().slice().reverse(), body = $("signal-body");
+    body.replaceChildren(); $("record-count").textContent = list.length + " 条";
+    $("empty-hint").hidden = !!list.length;
+    $("empty-hint").textContent = signals.length ? "没有符合筛选条件的记录" : "暂无观点记录";
+    list.forEach(s => {
+      const tr = node("tr"), who = node("td"), asset = node("td");
+      who.append(node("strong", s.kol), node("span", s.time, "record-time"));
+      asset.append(node("strong", s.asset), node("span", s.dir === "多" ? "看多" : "看空", "direction " + (s.dir === "多" ? "long" : "short")));
+      const evidence = node("td", undefined, "evidence");
+      if (s.note) {
+        const details = node("details");
+        details.append(node("summary", s.note.slice(0, 70) + (s.note.length > 70 ? "…" : "")), node("p", s.note));
+        evidence.append(details);
+      } else evidence.append(node("span", "暂无原话", "muted"));
+      if (s.sourceUrl) {
+        const link = node("a", "查看原文");
+        link.href = s.sourceUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
+        evidence.append(link);
+      }
+      const result = node("td"), select = node("select", undefined, "result-select " + s.result);
+      select.setAttribute("aria-label", s.kol + " · " + s.asset + " 的验证结果");
+      [["pending", "待验证"], ["win", "判对"], ["lose", "判错"]].forEach(([value, label]) => select.add(new Option(label, value)));
+      select.value = s.result;
+      select.addEventListener("change", () => {
+        if (!persist(signals.map(record => record.id === s.id ? { ...record, result: select.value } : record), "验证结果已保存")) select.value = s.result;
       });
-      if (kols.indexOf(cur) !== -1) sel.value = cur;
-    });
-  }
-
-  /* ---------- X 链接自动识别 ---------- */
-  function extractTweetUrl(raw) {
-    var m = String(raw || "").match(/(?:https?:\/\/)?(?:x\.com|twitter\.com)\/([A-Za-z0-9_]+)\/status\/(\d+)/);
-    return m ? { user: m[1], id: m[2] } : null;
-  }
-  function detectDirection(text) {
-    var t = text || "";
-    var long = /做多|看多|多单|买入|抄底|加仓|看涨|暴涨|翻多|满仓|冲高/.test(t);
-    var short = /做空|看空|空单|卖出|清仓|止盈|看跌|暴跌|翻空|减仓|逃顶/.test(t);
-    if (long && !short) return "多";
-    if (short && !long) return "空";
-    return "未知";
-  }
-  function detectAsset(text) {
-    var t = text || "";
-    if (/BTC|比特币|大饼/i.test(t)) return "BTC";
-    if (/ETH|以太/i.test(t)) return "ETH";
-    if (/黄金|XAU/i.test(t)) return "黄金";
-    if (/纳指|纳斯达克|NAS100/i.test(t)) return "纳斯达克";
-    return "";
-  }
-  $("btn-fetch-x").addEventListener("click", function () {
-    var raw = $("x-url").value.trim();
-    var status = $("x-status");
-    if (!raw) { status.textContent = "请先粘贴 X 链接"; status.className = "x-status"; return; }
-    var parsed = extractTweetUrl(raw);
-    if (!parsed) { status.textContent = "链接格式不对，需要包含 x.com/作者/status/数字"; status.className = "x-status err"; return; }
-    status.textContent = "识别中…";
-    status.className = "x-status loading";
-    fetch("https://api.fxtwitter.com/" + parsed.user + "/status/" + parsed.id)
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.code !== 200 || !data.tweet) throw new Error("bad");
-        var tw = data.tweet;
-        var kol = (tw.author && tw.author.screen_name) || parsed.user;
-        var text = tw.text || "";
-        var dir = detectDirection(text);
-        var asset = detectAsset(text);
-        $("f-kol").value = kol;
-        if (asset) $("f-asset").value = asset;
-        if (dir !== "未知") $("f-dir").value = dir;
-        $("f-note").value = text.slice(0, 120) + "  |  " + tw.url;
-        status.textContent = "已识别 @" + kol + " · " + (dir === "未知" ? "方向待确认" : ("看" + (dir === "多" ? "多" : "空"))) + (asset ? " · " + asset : "") + "，请核对后点「录入」";
-        status.className = "x-status ok";
-      })
-      .catch(function () {
-        status.textContent = "主接口失败，尝试备用接口…";
-        fetch("https://api.vxtwitter.com/" + parsed.user + "/status/" + parsed.id)
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            var kol = d.user_screen_name || d.user_name || parsed.user;
-            var text = d.text || "";
-            var dir = detectDirection(text);
-            var asset = detectAsset(text);
-            $("f-kol").value = kol;
-            if (asset) $("f-asset").value = asset;
-            if (dir !== "未知") $("f-dir").value = dir;
-            $("f-note").value = text.slice(0, 120) + "  |  " + d.tweetURL;
-            status.textContent = "已识别 @" + kol + "，请核对后点「录入」";
-            status.className = "x-status ok";
-          })
-          .catch(function () {
-            status.textContent = "识别失败，请检查链接或稍后再试";
-            status.className = "x-status err";
-          });
-      });
-  });
-
-  /* ---------- 添加 ---------- */
-  $("add-form").addEventListener("submit", function (e) {
-    e.preventDefault();
-    var sig = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      time: nowStr(),
-      kol: $("f-kol").value.trim(),
-      asset: $("f-asset").value.trim(),
-      dir: $("f-dir").value,
-      entry: $("f-entry").value.trim(),
-      note: $("f-note").value.trim(),
-      result: "pending"
-    };
-    signals.push(sig);
-    save();
-    this.reset();
-    refreshKolSelectors();
-    renderAll();
-  });
-
-  /* ---------- 列表操作（事件委托） ---------- */
-  $("signal-body").addEventListener("click", function (e) {
-    var btn = e.target.closest("button[data-act]");
-    if (!btn) return;
-    var id = btn.getAttribute("data-id");
-    var act = btn.getAttribute("data-act");
-    var idx = signals.findIndex(function (s) { return s.id === id; });
-    if (idx === -1) return;
-    if (act === "del") {
-      signals.splice(idx, 1);
-    } else if (act === "win" || act === "lose") {
-      signals[idx].result = act;
-    }
-    save();
-    refreshKolSelectors();
-    renderAll();
-  });
-
-  /* ---------- 过滤 ---------- */
-  $("filter-kol").addEventListener("change", function () { renderStats(); renderList(); });
-
-  /* ---------- 导出 / 导入 ---------- */
-  $("btn-export").addEventListener("click", function () {
-    var blob = new Blob([JSON.stringify(signals, null, 2)], { type: "application/json" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "reverse-signal-" + Date.now() + ".json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-  });
-  $("btn-import").addEventListener("click", function () { $("file-import").click(); });
-  $("file-import").addEventListener("change", function (e) {
-    var file = e.target.files[0];
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function () {
-      try {
-        var data = JSON.parse(reader.result);
-        if (Array.isArray(data)) {
-          signals = signals.concat(data);
-          save(); refreshKolSelectors(); renderAll();
+      result.append(select);
+      const actions = node("td", undefined, "row-actions"), edit = node("button", "编辑", "row-btn");
+      edit.addEventListener("click", () => editRecord(s));
+      const remove = node("button", "删除", "row-btn danger");
+      remove.addEventListener("click", () => {
+        const before = signals.slice();
+        if (persist(signals.filter(record => record.id !== s.id), "记录已删除，可撤销")) {
+          undoRecords = before; $("btn-undo").hidden = false;
+          if (editId === s.id) resetForm();
         }
-      } catch (err) { alert("导入失败：文件格式不正确"); }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
+      });
+      actions.append(edit, remove);
+      tr.append(who, asset, node("td", s.entry || "--", "entry-price"), evidence, result, actions);
+      body.append(tr);
+    });
+  }
+  function cancelRequest() {
+    requestId++;
+    if (controller) controller.abort();
+    controller = null;
+    $("btn-fetch-x").disabled = false; $("btn-fetch-x").textContent = "识别链接";
+  }
+  function resetForm() {
+    cancelRequest(); editId = null; $("add-form").reset();
+    $("x-url").value = ""; $("x-status").textContent = "";
+    $("form-title").textContent = "记录观点"; $("btn-submit").textContent = "保存记录";
+    $("btn-cancel").hidden = true;
+  }
+  function editRecord(record) {
+    if (editId !== record.id && draftExists() && !confirm("放弃当前未保存的内容，编辑这条记录？")) return;
+    cancelRequest(); editId = record.id;
+    ["kol", "asset", "dir", "entry", "note"].forEach(key => $("f-" + key).value = record[key]);
+    $("f-source").value = record.sourceUrl; $("x-url").value = record.sourceUrl; $("x-status").textContent = "";
+    $("form-title").textContent = "编辑观点"; $("btn-submit").textContent = "保存修改";
+    $("btn-cancel").hidden = false; $("f-kol").focus();
+  }
+  function draftExists() { return ["kol", "asset", "dir", "entry", "note"].some(key => $("f-" + key).value.trim()); }
+  function nowStr() {
+    const date = new Date(), pad = n => String(n).padStart(2, "0");
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  }
+  $("add-form").addEventListener("submit", event => {
+    event.preventDefault(); cancelRequest();
+    const previous = signals.find(s => s.id === editId);
+    try {
+      if (editId && !previous) throw new Error("这条记录已不存在，请取消编辑后重新录入");
+      const record = core.normalize({ id: editId || core.makeId(), time: previous ? previous.time : nowStr(),
+        kol: $("f-kol").value, asset: $("f-asset").value, dir: $("f-dir").value,
+        entry: $("f-entry").value, note: $("f-note").value, sourceUrl: $("f-source").value,
+        result: previous ? previous.result : "pending" });
+      if (!editId && signals.length >= core.MAX_RECORDS) throw new Error("已达到记录数量上限，请先导出备份");
+      const next = editId ? signals.map(s => s.id === editId ? record : s) : signals.concat(record);
+      if (persist(next, editId ? "修改已保存" : "观点已记录")) {
+        resetForm(); undoRecords = null; $("btn-undo").hidden = true;
+      }
+    } catch (error) { notice(error.message, true); }
   });
-
-  /* ---------- 清空 ---------- */
-  $("btn-clear").addEventListener("click", function () {
-    if (confirm("确定清空所有记录？此操作不可恢复。")) {
-      signals = []; save(); refreshKolSelectors(); renderAll();
+  $("btn-cancel").addEventListener("click", resetForm);
+  $("add-form").addEventListener("input", () => {
+    if (controller) { cancelRequest(); $("x-status").textContent = "已取消识别，保留手动输入"; }
+  });
+  $("x-url").addEventListener("input", () => { if (controller) cancelRequest(); $("x-status").textContent = ""; });
+  $("btn-fetch-x").addEventListener("click", async () => {
+    const parsed = core.tweetUrl($("x-url").value);
+    if (!parsed) { $("x-status").textContent = "请输入完整的 X / Twitter 推文链接"; return; }
+    if (draftExists() && !confirm("用这条推文替换当前未保存的表单内容？")) return;
+    cancelRequest(); const current = requestId;
+    ["kol", "asset", "dir", "entry", "note"].forEach(key => $("f-" + key).value = "");
+    $("f-source").value = "";
+    $("btn-fetch-x").disabled = true; $("btn-fetch-x").textContent = "识别中…";
+    $("x-status").textContent = "正在读取推文…";
+    for (const host of ["https://api.fxtwitter.com/", "https://api.vxtwitter.com/"]) {
+      const abort = new AbortController(); controller = abort;
+      const timeout = setTimeout(() => abort.abort(), 8000);
+      try {
+        const response = await fetch(host + parsed.user + "/status/" + parsed.id, { signal: abort.signal, credentials: "omit", referrerPolicy: "no-referrer" });
+        if (!response.ok) throw new Error("读取失败");
+        const tweet = core.parseTweet(await response.json(), parsed);
+        if (current !== requestId) return;
+        ["kol", "asset", "dir", "entry", "note"].forEach(key => $("f-" + key).value = tweet[key]);
+        $("f-source").value = tweet.sourceUrl;
+        $("x-status").textContent = "已读取 @" + tweet.kol + (!tweet.dir || !tweet.asset ? "；标的或方向待确认" : "；请核对标的和方向");
+        cancelRequest(); return;
+      } catch (_) {
+        if (current !== requestId) return;
+        $("x-status").textContent = "主接口不可用，正在尝试备用接口…";
+      } finally { clearTimeout(timeout); }
+    }
+    if (current === requestId) {
+      cancelRequest(); $("f-source").value = parsed.url;
+      $("x-status").textContent = "读取失败，未填入任何推文内容。可手动录入；原文链接已保留。";
     }
   });
-
-  /* ---------- 反指证书 ---------- */
-  $("btn-cert").addEventListener("click", function () {
-    var kol = $("cert-kol").value;
-    var out = $("cert-output");
-    if (!kol) { out.classList.add("hidden"); return; }
-    var c = compute(kol);
-    if (!c.decided) { alert("该 KOL 还没有已验证的结果，无法生成证书。"); return; }
-    var stars = "★".repeat(c.stars) + "☆".repeat(Math.max(0, 18 - c.stars));
-    var quotes = [
-      "「他一喊单，我就反手。这些年，全靠他养着我。」",
-      "「市场唯一的确定性，就是他一定错。」",
-      "「感谢灯哥，让我在反向的道路上越走越宽。」",
-      "「别人看K线，我看他反着来。」"
-    ];
-    var q = quotes[Math.floor(Math.random() * quotes.length)];
-    out.innerHTML =
-      '<h3>反向指标认证证书</h3>' +
-      '<div class="cert-sub">CERTIFICATE OF REVERSE INDICATOR · No.' + (kol.charCodeAt(0) * 7 + c.stars * 13) + '</div>' +
-      '<div class="c-stars">' + stars + '</div>' +
-      '<div class="cert-grid">' +
-        '<div class="c-item"><div class="c-k">认证对象</div><div class="c-v">' + esc(kol) + "</div></div>" +
-        '<div class="c-item"><div class="c-k">反向置信度</div><div class="c-v">' + c.confidence + "%</div></div>" +
-        '<div class="c-item"><div class="c-k">样本数</div><div class="c-v">' + c.decided + "</div></div>" +
-      "</div>" +
-      '<div class="c-quote">' + q + "</div>" +
-      '<div class="c-foot">经反指看板·反向指标追踪器 严谨（且充满讽刺）地统计认证 &nbsp;|&nbsp; ' + nowStr() + "</div>";
-    out.classList.remove("hidden");
+  function download(text, filename) {
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = node("a"); a.href = url; a.download = filename;
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function backup(records) { return JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), signals: records }); }
+  $("btn-export").addEventListener("click", () => {
+    try {
+      const data = storageBlocked ? localStorage.getItem(KEY) : backup(signals);
+      if (data === null) throw new Error("浏览器中没有可导出的数据");
+      download(data, "reverse-signal-" + (storageBlocked ? "raw-" : "") + Date.now() + ".json");
+      notice("备份已生成" + (storageBlocked ? "，本地原始数据仍未改动" : ""));
+    } catch (error) { notice("无法导出：" + error.message, true); }
   });
-
-  /* ---------- 初始化 ---------- */
-  function renderAll() { refreshKolSelectors(); renderStats(); renderList(); }
+  $("btn-import").addEventListener("click", () => $("file-import").click());
+  $("file-import").addEventListener("change", async event => {
+    const file = event.target.files[0]; event.target.value = "";
+    if (!file) return;
+    try {
+      if (file.size > core.MAX_BACKUP_BYTES) throw new Error("备份文件不能超过 2 MB");
+      const imported = core.parseRecords(JSON.parse(await file.text()));
+      const merged = core.mergeRecords(signals, imported);
+      persist(merged.records, "导入完成：新增 " + merged.added + " 条，跳过重复 " + merged.skipped + " 条");
+    } catch (error) { notice("导入失败，现有数据未改动：" + error.message, true); }
+  });
+  $("btn-clear").addEventListener("click", () => {
+    if (!signals.length && !storageBlocked) return;
+    if (!confirm(storageBlocked ? "确认已导出原始备份？清空会删除当前无法读取的原始数据，不能撤销。" : "清空全部 " + signals.length + " 条记录？建议先导出备份。")) return;
+    const before = signals.slice(), wasBlocked = storageBlocked; storageBlocked = false;
+    if (persist([], "记录已清空")) {
+      resetForm(); undoRecords = wasBlocked ? null : before; $("btn-undo").hidden = !undoRecords;
+    } else storageBlocked = wasBlocked;
+  });
+  $("btn-undo").addEventListener("click", () => {
+    if (!undoRecords) return;
+    try {
+      // Merge restored records without overwriting changes made after the deletion.
+      const restored = core.mergeRecords(signals, undoRecords).records;
+      if (persist(restored, "已恢复删除的记录")) { undoRecords = null; $("btn-undo").hidden = true; }
+    } catch (error) { notice("无法撤销：" + error.message, true); }
+  });
+  function renderCertificate() {
+    const out = $("cert-output"); out.replaceChildren(); out.hidden = true;
+    if (!certKol) return;
+    const c = core.compute(signals.filter(s => s.kol === certKol));
+    if (!c.total) { certKol = ""; return; }
+    out.hidden = false;
+    out.append(node("span", "REVERSE SIGNAL / 历史样本", "cert-kicker"), node("h3", "反指观察证书"), node("p", certKol, "cert-name"));
+    const grid = node("div", undefined, "cert-grid");
+    [["历史判错比例", percent(c.wrongRate)], ["已验证样本", String(c.decided)], ["娱乐星级", c.stars === null ? "暂不评级" : c.stars + " / 18"]].forEach(([label, value]) => {
+      const item = node("div"); item.append(node("span", label), node("strong", value)); grid.append(item);
+    });
+    out.append(grid, node("p", c.decided < core.MIN_SAMPLES ? "样本不足，暂不评级。" : "保持怀疑，让记录说话。", "cert-quote"), node("p", "手动验证 · 截至 " + nowStr() + " · 不代表未来胜率或实际交易收益", "cert-foot"));
+  }
+  $("btn-cert").addEventListener("click", () => {
+    certKol = $("cert-kol").value;
+    if (!certKol) { notice("请先选择一个 KOL", true); return; } renderCertificate();
+  });
+  $("cert-kol").addEventListener("change", () => { certKol = ""; renderCertificate(); });
+  $("filter-kol").addEventListener("change", () => { renderStats(); renderList(); });
+  $("filter-result").addEventListener("change", () => { renderStats(); renderList(); });
+  window.addEventListener("storage", event => {
+    if (event.key !== KEY && event.key !== null) return;
+    storageBlocked = true;
+    notice("数据已在另一个窗口更改。为避免覆盖，当前窗口暂停写入；请刷新页面后继续。", true);
+  });
+  function renderAll() { refreshSelectors(); renderStats(); renderList(); renderCertificate(); }
   renderAll();
 })();
