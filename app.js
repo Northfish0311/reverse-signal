@@ -5,6 +5,8 @@
   const $ = id => document.getElementById(id);
   let signals = [], editId = null, storageBlocked = false, undoRecords = null;
   let requestId = 0, controller = null, certKol = "";
+  const PAGE_SIZE = 25;
+  let pageIndex = 0;
 
   function notice(text, error = false) {
     $("notice").textContent = text;
@@ -33,9 +35,23 @@
     if (className) el.className = className;
     return el;
   }
+  function toolButton(label, icon, className = "") {
+    const button = node("button", undefined, "icon-btn " + className);
+    button.type = "button"; button.title = label; button.setAttribute("aria-label", label);
+    const symbol = node("span", undefined, "icon icon-" + icon);
+    symbol.setAttribute("aria-hidden", "true"); button.append(symbol);
+    return button;
+  }
   function percent(rate) { return rate === null ? "--" : Math.round(rate * 100) + "%"; }
-  function kolRecords() { const kol = $("filter-kol").value; return signals.filter(s => !kol || s.kol === kol); }
-  function visibleRecords() { const result = $("filter-result").value; return kolRecords().filter(s => !result || s.result === result); }
+  function scopedRecords() {
+    const kol = $("filter-kol").value, asset = $("filter-asset").value, query = $("search-records").value.trim().toLocaleLowerCase();
+    return signals.filter(s => (!kol || s.kol === kol) && (!asset || s.asset === asset) && (!query || [s.kol, s.asset, s.note, s.sourceUrl, s.entry].join(" ").toLocaleLowerCase().includes(query)));
+  }
+  function visibleRecords() {
+    const result = $("filter-result").value, direction = $("sort-records").value === "oldest" ? 1 : -1;
+    return scopedRecords().filter(s => !result || s.result === result).map((record, index) => ({ record, index }))
+      .sort((a, b) => direction * (Date.parse(a.record.time.replace(" ", "T")) - Date.parse(b.record.time.replace(" ", "T")) || a.index - b.index)).map(item => item.record);
+  }
   function refreshSelectors() {
     const kols = [...new Set(signals.map(s => s.kol))].sort((a, b) => a.localeCompare(b, "zh-CN"));
     ["filter-kol", "cert-kol"].forEach(id => {
@@ -44,9 +60,14 @@
       kols.forEach(kol => select.add(new Option(kol, kol)));
       if (kols.includes(value)) select.value = value;
     });
+    const assetSelect = $("filter-asset"), selectedAsset = assetSelect.value;
+    const assets = [...new Set(signals.map(s => s.asset))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+    assetSelect.replaceChildren(new Option("全部标的", ""));
+    assets.forEach(asset => assetSelect.add(new Option(asset, asset)));
+    if (assets.includes(selectedAsset)) assetSelect.value = selectedAsset;
   }
   function renderStats() {
-    const c = core.compute(kolRecords());
+    const c = core.compute(scopedRecords());
     $("stat-total").textContent = c.total;
     $("stat-decided").textContent = "已验证 " + c.decided + " · 待验证 " + c.pending;
     $("stat-stars").textContent = c.stars === null ? "--" : c.stars + " / 18";
@@ -57,12 +78,19 @@
     $("stat-right-count").textContent = "判对 " + c.wins + " / 已验证 " + c.decided;
   }
   function renderList() {
-    const list = visibleRecords().slice().reverse(), body = $("signal-body");
-    body.replaceChildren(); $("record-count").textContent = list.length + " 条";
+    const records = visibleRecords(), body = $("signal-body");
+    const pages = Math.max(1, Math.ceil(records.length / PAGE_SIZE));
+    pageIndex = Math.max(0, Math.min(pageIndex, pages - 1));
+    const list = records.slice(pageIndex * PAGE_SIZE, (pageIndex + 1) * PAGE_SIZE);
+    body.replaceChildren(); $("record-count").textContent = records.length + " 条";
+    $("pagination").hidden = !records.length;
+    $("page-label").textContent = "第 " + (pageIndex + 1) + " / " + pages + " 页 · " + records.length + " 条";
+    $("btn-prev-page").disabled = pageIndex === 0;
+    $("btn-next-page").disabled = pageIndex >= pages - 1;
     $("empty-hint").hidden = !!list.length;
     $("empty-hint").textContent = signals.length ? "没有符合筛选条件的记录" : "暂无观点记录";
     list.forEach(s => {
-      const tr = node("tr"), who = node("td"), asset = node("td");
+      const tr = node("tr"), who = node("td", undefined, "record-who"), asset = node("td", undefined, "record-asset");
       who.append(node("strong", s.kol), node("span", s.time, "record-time"));
       asset.append(node("strong", s.asset), node("span", s.dir === "多" ? "看多" : "看空", "direction " + (s.dir === "多" ? "long" : "short")));
       const evidence = node("td", undefined, "evidence");
@@ -76,7 +104,7 @@
         link.href = s.sourceUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
         evidence.append(link);
       }
-      const result = node("td"), select = node("select", undefined, "result-select " + s.result);
+      const result = node("td", undefined, "record-result"), select = node("select", undefined, "result-select " + s.result);
       select.setAttribute("aria-label", s.kol + " · " + s.asset + " 的验证结果");
       [["pending", "待验证"], ["win", "判对"], ["lose", "判错"]].forEach(([value, label]) => select.add(new Option(label, value)));
       select.value = s.result;
@@ -84,9 +112,9 @@
         if (!persist(signals.map(record => record.id === s.id ? { ...record, result: select.value } : record), "验证结果已保存")) select.value = s.result;
       });
       result.append(select);
-      const actions = node("td", undefined, "row-actions"), edit = node("button", "编辑", "row-btn");
+      const actions = node("td", undefined, "row-actions"), edit = toolButton("编辑观点", "pencil", "row-btn");
       edit.addEventListener("click", () => editRecord(s));
-      const remove = node("button", "删除", "row-btn danger");
+      const remove = toolButton("删除观点", "trash-2", "row-btn danger");
       remove.addEventListener("click", () => {
         const before = signals.slice();
         if (persist(signals.filter(record => record.id !== s.id), "记录已删除，可撤销")) {
@@ -95,7 +123,8 @@
         }
       });
       actions.append(edit, remove);
-      tr.append(who, asset, node("td", s.entry || "--", "entry-price"), evidence, result, actions);
+      const price = node("td", s.entry || "--", "entry-price"); price.dataset.label = "参考价";
+      tr.append(who, asset, price, evidence, result, actions);
       body.append(tr);
     });
   }
@@ -105,21 +134,39 @@
     controller = null;
     $("btn-fetch-x").disabled = false; $("btn-fetch-x").textContent = "识别链接";
   }
+  function setEditorOpen(open) {
+    $("editor-panel").hidden = !open;
+    $("btn-new").setAttribute("aria-expanded", String(open));
+  }
   function resetForm() {
     cancelRequest(); editId = null; $("add-form").reset();
     $("x-url").value = ""; $("x-status").textContent = "";
     $("form-title").textContent = "记录观点"; $("btn-submit").textContent = "保存记录";
     $("btn-cancel").hidden = true;
+    setEditorOpen(false);
   }
   function editRecord(record) {
-    if (editId !== record.id && draftExists() && !confirm("放弃当前未保存的内容，编辑这条记录？")) return;
+    if (editId === record.id) { setEditorOpen(true); $("f-kol").focus(); return; }
+    if (editId !== record.id && hasUnsavedChanges() && !confirm("放弃当前未保存的内容，编辑这条记录？")) return;
     cancelRequest(); editId = record.id;
     ["kol", "asset", "dir", "entry", "note"].forEach(key => $("f-" + key).value = record[key]);
     $("f-source").value = record.sourceUrl; $("x-url").value = record.sourceUrl; $("x-status").textContent = "";
     $("form-title").textContent = "编辑观点"; $("btn-submit").textContent = "保存修改";
-    $("btn-cancel").hidden = false; $("f-kol").focus();
+    $("btn-cancel").hidden = false; setEditorOpen(true); $("f-kol").focus();
   }
-  function draftExists() { return ["kol", "asset", "dir", "entry", "note"].some(key => $("f-" + key).value.trim()); }
+  function draftExists() { return ["kol", "asset", "dir", "entry", "note", "source"].some(key => $("f-" + key).value.trim()) || !!$("x-url").value.trim(); }
+  function hasUnsavedChanges() {
+    if (!editId) return draftExists();
+    const previous = signals.find(record => record.id === editId);
+    if (!previous) return draftExists();
+    return ["kol", "asset", "dir", "entry", "note"].some(key => $("f-" + key).value.trim() !== previous[key]) || $("f-source").value.trim() !== previous.sourceUrl || $("x-url").value.trim() !== previous.sourceUrl;
+  }
+  $("btn-new").addEventListener("click", () => {
+    if (editId && hasUnsavedChanges() && !confirm("放弃当前编辑，新增一条观点？")) return;
+    if (editId) resetForm();
+    setEditorOpen(true); $("f-kol").focus();
+  });
+  $("btn-collapse").addEventListener("click", () => { setEditorOpen(false); $("btn-new").focus(); });
   function nowStr() {
     const date = new Date(), pad = n => String(n).padStart(2, "0");
     return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
@@ -133,14 +180,19 @@
         kol: $("f-kol").value, asset: $("f-asset").value, dir: $("f-dir").value,
         entry: $("f-entry").value, note: $("f-note").value, sourceUrl: $("f-source").value,
         result: previous ? previous.result : "pending" });
+      const reviewReset = previous && previous.result !== "pending" && ["kol", "asset", "dir", "entry", "sourceUrl"].some(key => previous[key] !== record[key]);
+      if (reviewReset) record.result = "pending";
       if (!editId && signals.length >= core.MAX_RECORDS) throw new Error("已达到记录数量上限，请先导出备份");
       const next = editId ? signals.map(s => s.id === editId ? record : s) : signals.concat(record);
-      if (persist(next, editId ? "修改已保存" : "观点已记录")) {
+      const isNew = !editId;
+      if (persist(next, reviewReset ? "关键观点已修改，结果已恢复为待验证" : editId ? "修改已保存" : "观点已记录")) {
         resetForm(); undoRecords = null; $("btn-undo").hidden = true;
+        if (isNew) resetFilters();
+        $("btn-new").focus();
       }
     } catch (error) { notice(error.message, true); }
   });
-  $("btn-cancel").addEventListener("click", resetForm);
+  $("btn-cancel").addEventListener("click", () => { resetForm(); $("btn-new").focus(); });
   $("add-form").addEventListener("input", () => {
     if (controller) { cancelRequest(); $("x-status").textContent = "已取消识别，保留手动输入"; }
   });
@@ -148,10 +200,9 @@
   $("btn-fetch-x").addEventListener("click", async () => {
     const parsed = core.tweetUrl($("x-url").value);
     if (!parsed) { $("x-status").textContent = "请输入完整的 X / Twitter 推文链接"; return; }
-    if (draftExists() && !confirm("用这条推文替换当前未保存的表单内容？")) return;
+    const hadDraft = ["kol", "asset", "dir", "entry", "note", "source"].some(key => $("f-" + key).value.trim());
+    if (hadDraft && !confirm("用这条推文替换当前未保存的表单内容？")) return;
     cancelRequest(); const current = requestId;
-    ["kol", "asset", "dir", "entry", "note"].forEach(key => $("f-" + key).value = "");
-    $("f-source").value = "";
     $("btn-fetch-x").disabled = true; $("btn-fetch-x").textContent = "识别中…";
     $("x-status").textContent = "正在读取推文…";
     for (const host of ["https://api.fxtwitter.com/", "https://api.vxtwitter.com/"]) {
@@ -172,8 +223,9 @@
       } finally { clearTimeout(timeout); }
     }
     if (current === requestId) {
-      cancelRequest(); $("f-source").value = parsed.url;
-      $("x-status").textContent = "读取失败，未填入任何推文内容。可手动录入；原文链接已保留。";
+      cancelRequest();
+      if (!hadDraft) $("f-source").value = parsed.url;
+      $("x-status").textContent = hadDraft ? "读取失败，原有输入已保留，未替换为新推文。" : "读取失败，可手动录入；原文链接已保留。";
     }
   });
   function download(text, filename) {
@@ -213,7 +265,7 @@
     if (!undoRecords) return;
     try {
       // Merge restored records without overwriting changes made after the deletion.
-      const restored = core.mergeRecords(signals, undoRecords).records;
+      const restored = core.restoreRecords(signals, undoRecords);
       if (persist(restored, "已恢复删除的记录")) { undoRecords = null; $("btn-undo").hidden = true; }
     } catch (error) { notice("无法撤销：" + error.message, true); }
   });
@@ -235,8 +287,23 @@
     if (!certKol) { notice("请先选择一个 KOL", true); return; } renderCertificate();
   });
   $("cert-kol").addEventListener("change", () => { certKol = ""; renderCertificate(); });
-  $("filter-kol").addEventListener("change", () => { renderStats(); renderList(); });
-  $("filter-result").addEventListener("change", () => { renderStats(); renderList(); });
+  function refreshFilters() { pageIndex = 0; renderStats(); renderList(); }
+  ["filter-kol", "filter-asset", "filter-result", "sort-records"].forEach(id => $(id).addEventListener("change", refreshFilters));
+  $("search-records").addEventListener("input", refreshFilters);
+  function resetFilters() {
+    ["filter-kol", "filter-asset", "filter-result", "search-records"].forEach(id => $(id).value = "");
+    $("sort-records").value = "newest"; refreshFilters();
+  }
+  $("btn-reset-filters").addEventListener("click", resetFilters);
+  function turnPage(delta) {
+    pageIndex += delta; renderList(); $("archive-title").setAttribute("tabindex", "-1"); $("archive-title").focus();
+  }
+  $("btn-prev-page").addEventListener("click", () => turnPage(-1));
+  $("btn-next-page").addEventListener("click", () => turnPage(1));
+  window.addEventListener("beforeunload", event => {
+    if (!hasUnsavedChanges()) return;
+    event.preventDefault(); event.returnValue = "";
+  });
   window.addEventListener("storage", event => {
     if (event.key !== KEY && event.key !== null) return;
     storageBlocked = true;

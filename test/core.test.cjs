@@ -33,6 +33,22 @@ test('imports enforce total record limit without changing existing records', () 
   assert.throws(() => core.mergeRecords(existing, [core.normalize(sample({ id: 'new', note: 'new' }))]), /总数/);
   assert.equal(existing.length, core.MAX_RECORDS);
 });
+
+test('undo restores positions without reverting later verification changes or imports', () => {
+  const before = ['a', 'b', 'c'].map(id => core.normalize(sample({ id, note: id })));
+  const current = [{ ...before[1], result: 'lose' }, before[2], core.normalize(sample({ id: 'd', note: 'd' }))];
+  const restored = core.restoreRecords(current, before);
+  assert.deepEqual(restored.map(s => s.id), ['a', 'b', 'c', 'd']);
+  assert.equal(restored[1].result, 'lose');
+  assert.deepEqual(current.map(s => s.id), ['b', 'c', 'd']);
+});
+
+test('undo clear keeps newer values when a restored ID already exists', () => {
+  const old = core.normalize(sample());
+  const restored = core.restoreRecords([{ ...old, result: 'win' }], [old]);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].result, 'win');
+});
 test('pending records do not affect historical proportions', () => {
   const c = core.compute([sample(), sample({ result: 'win' }), sample({ result: 'lose' })]);
   assert.equal(c.total, 3); assert.equal(c.decided, 2); assert.equal(c.pending, 1);

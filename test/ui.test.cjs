@@ -83,12 +83,19 @@ test('late response cannot overwrite manual edits', async t => {
   resolve({ ok: true, json: async () => ({ text: '看多 BTC' }) }); await tick();
   assert.equal($('f-kol').value, '手动账号'); assert.equal($('f-note').value, '');
 });
-test('invalid API payload falls back and fails visibly without stale data', async t => {
+test('failed link recognition preserves the existing draft instead of clearing it', async t => {
   let calls = 0;
   const { $, input } = app(t, [], async () => { calls++; return { ok: true, json: async () => ({ error: 'not found' }) }; });
   input('f-asset', 'BTC'); input('f-dir', '多'); $('x-url').value = 'https://x.com/name/status/123'; $('btn-fetch-x').click(); await tick();
-  assert.equal(calls, 2); assert.match($('x-status').textContent, /读取失败/); assert.equal($('f-asset').value, '');
+  assert.equal(calls, 2); assert.match($('x-status').textContent, /原有输入已保留/); assert.equal($('f-asset').value, 'BTC');
+  assert.equal($('f-dir').value, '多'); assert.equal($('f-source').value, '');
+});
+
+test('failed recognition in an empty form retains the source for manual entry', async t => {
+  const { $ } = app(t, [], async () => ({ ok: false }));
+  $('x-url').value = 'https://x.com/name/status/123'; $('btn-fetch-x').click(); await tick();
   assert.equal($('f-source').value, 'https://x.com/name/status/123');
+  assert.equal($('f-asset').value, ''); assert.match($('x-status').textContent, /读取失败/);
 });
 test('imports are atomic and duplicate imports are skipped', async t => {
   const { w, $, data } = app(t, [sample()]);
@@ -121,4 +128,125 @@ test('oversized new backups are rejected before changing stored data', t => {
   assert.equal(data().length, 70);
   assert.match($('notice').textContent, /备份容量上限/);
   assert.equal($('f-kol').value, 'new');
+});
+
+test('changing any key opinion field requires verification again', t => {
+  for (const [field, value] of [['kol', '另一个账号'], ['asset', 'ETH'], ['dir', '空'], ['entry', '66000'], ['source', 'https://x.com/name/status/456']]) {
+    const { w, $, input, submit, data } = app(t, [sample({ result: 'win' })]);
+    w.document.querySelector('.row-btn').click(); input('f-' + field, value); submit();
+    assert.equal(data()[0].result, 'pending', field);
+    assert.equal(data()[0].id, 'old1');
+    assert.equal(data()[0].time, '2026-10-22 10:30');
+    assert.match($('notice').textContent, /恢复为待验证/);
+    assert.equal($('stat-confidence').textContent, '--');
+  }
+});
+
+test('notes and whitespace-only edits preserve the verified outcome', t => {
+  const { w, input, submit, data } = app(t, [sample({ result: 'lose' })]);
+  w.document.querySelector('.row-btn').click();
+  input('f-note', '补充验证依据'); input('f-kol', ' 测试账号 '); submit();
+  assert.equal(data()[0].result, 'lose');
+});
+
+test('failed opinion edit preserves stored verification and editable draft', t => {
+  const { w, $, input, submit, data } = app(t, [sample({ result: 'win' })]);
+  w.document.querySelector('.row-btn').click(); input('f-dir', '空');
+  w.Storage.prototype.setItem = () => { throw new Error('quota'); }; submit();
+  assert.equal(data()[0].result, 'win'); assert.equal(data()[0].dir, '多');
+  assert.equal($('f-dir').value, '空'); assert.equal($('editor-panel').hidden, false);
+});
+
+test('undo preserves the original equal-time record order', t => {
+  const { w, $, data } = app(t, [sample(), sample({ id: 'new', note: 'new' })]);
+  w.document.querySelectorAll('.row-btn.danger')[1].click(); $('btn-undo').click();
+  assert.deepEqual(data().map(s => s.id), ['old1', 'new']);
+  assert.match(w.document.querySelector('.evidence').textContent, /new/);
+});
+
+test('the editor is collapsed initially and hiding it preserves the draft', t => {
+  const { w, $, input, submit } = app(t);
+  assert.equal($('editor-panel').hidden, true);
+  $('btn-new').click(); assert.equal($('editor-panel').hidden, false);
+  input('f-kol', '草稿'); input('f-asset', 'BTC'); input('f-dir', '多');
+  $('btn-collapse').click(); assert.equal($('editor-panel').hidden, true);
+  $('btn-new').click(); assert.equal($('f-kol').value, '草稿');
+  assert.equal($('btn-new').getAttribute('aria-expanded'), 'true');
+  submit(); assert.equal($('editor-panel').hidden, true);
+  assert.equal(w.document.activeElement.id, 'btn-new');
+});
+
+test('opening another record or new entry cannot discard changes without confirmation', t => {
+  const { w, $, input } = app(t, [sample(), sample({ id: 'second', note: 'second' })]);
+  w.document.querySelector('.row-btn').click(); input('f-note', '未保存');
+  w.confirm = () => false;
+  w.document.querySelectorAll('.row-btn:not(.danger)')[1].click();
+  assert.equal($('f-note').value, '未保存');
+  $('btn-new').click(); assert.equal($('f-note').value, '未保存');
+});
+
+test('reopening the same edited record keeps its unsaved changes', t => {
+  const { w, $, input } = app(t, [sample()]);
+  w.document.querySelector('.row-btn').click(); input('f-note', '未保存的补充');
+  $('btn-collapse').click(); w.document.querySelector('.row-btn').click();
+  assert.equal($('f-note').value, '未保存的补充'); assert.equal($('editor-panel').hidden, false);
+});
+
+test('source-only drafts are protected from accidental navigation', t => {
+  const { w, input } = app(t);
+  const clean = new w.Event('beforeunload', { cancelable: true }); w.dispatchEvent(clean);
+  assert.equal(clean.defaultPrevented, false);
+  input('f-source', 'https://x.com/name/status/123');
+  const dirty = new w.Event('beforeunload', { cancelable: true }); w.dispatchEvent(dirty);
+  assert.equal(dirty.defaultPrevented, true);
+});
+
+test('unmodified edit does not trigger the unsaved change warning', t => {
+  const { w } = app(t, [sample()]); w.document.querySelector('.row-btn').click();
+  const event = new w.Event('beforeunload', { cancelable: true }); w.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, false);
+});
+
+test('search and asset filtering scope statistics without result-filter bias', t => {
+  const { $, input, change } = app(t, [sample({ result: 'win', note: 'Alpha' }), sample({ id: 'b', result: 'lose', note: 'ALPHA' }), sample({ id: 'c', asset: 'ETH', note: 'alpha' })]);
+  input('search-records', 'alpha'); change('filter-asset', 'BTC'); change('filter-result', 'lose');
+  assert.equal($('record-count').textContent, '1 条'); assert.equal($('stat-total').textContent, '2');
+  assert.equal($('stat-confidence').textContent, '50%');
+  $('btn-reset-filters').click(); assert.equal($('record-count').textContent, '3 条');
+  assert.equal($('search-records').value, ''); assert.equal($('filter-asset').value, '');
+});
+
+test('pagination is bounded, filters reset the page, and dates determine sorting', t => {
+  const rows = Array.from({ length: 51 }, (_, i) => sample({ id: 'id' + i, note: 'note ' + i }));
+  const { w, $, input, change } = app(t, rows);
+  assert.equal(w.document.querySelectorAll('#signal-body tr').length, 25);
+  assert.equal($('record-count').textContent, '51 条'); assert.equal($('btn-prev-page').disabled, true);
+  $('btn-next-page').click(); $('btn-next-page').click();
+  assert.equal(w.document.querySelectorAll('#signal-body tr').length, 1);
+  assert.equal($('btn-next-page').disabled, true);
+  input('search-records', 'note 50'); assert.equal($('page-label').textContent, '第 1 / 1 页 · 1 条');
+  $('btn-reset-filters').click(); change('sort-records', 'oldest');
+  assert.match(w.document.querySelector('.evidence').textContent, /note 0/);
+});
+
+test('deleting the last item on a page clamps to the preceding page', t => {
+  const rows = Array.from({ length: 26 }, (_, i) => sample({ id: 'id' + i, note: 'note ' + i }));
+  const { w, $ } = app(t, rows); $('btn-next-page').click();
+  w.document.querySelector('.row-btn.danger').click();
+  assert.equal(w.document.querySelectorAll('#signal-body tr').length, 25);
+  assert.equal($('btn-prev-page').disabled, true); assert.equal($('btn-next-page').disabled, true);
+});
+
+test('out-of-order imports display by recorded time rather than import position', t => {
+  const { w, change } = app(t, [sample({ time: '2026-10-23 10:00', kol: 'new' }), sample({ id: 'b', time: '2026-10-20 10:00', kol: 'old' })]);
+  assert.equal(w.document.querySelector('.record-who strong').textContent, 'new');
+  change('sort-records', 'oldest'); assert.equal(w.document.querySelector('.record-who strong').textContent, 'old');
+});
+
+test('new records are visible even when saved from a filtered view', t => {
+  const { $, input, submit, data } = app(t, [sample()]);
+  input('search-records', 'no matches'); $('btn-new').click();
+  input('f-kol', '新账号'); input('f-asset', 'ETH'); input('f-dir', '多'); submit();
+  assert.equal(data().length, 2); assert.equal($('search-records').value, '');
+  assert.equal($('record-count').textContent, '2 条');
 });

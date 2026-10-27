@@ -64,6 +64,12 @@
     }
     return { records, added: records.length - existing.length, skipped };
   }
+  function restoreRecords(existing, beforeDeletion) {
+    const records = mergeRecords(existing, beforeDeletion).records;
+    const positions = new Map(beforeDeletion.map((record, index) => [record.id, index]));
+    // Keep current values, restore original positions, then retain later imports.
+    return records.sort((a, b) => (positions.get(a.id) ?? beforeDeletion.length) - (positions.get(b.id) ?? beforeDeletion.length));
+  }
   function compute(records) {
     const wins = records.filter(s => s.result === "win").length;
     const loses = records.filter(s => s.result === "lose").length;
@@ -89,5 +95,5 @@
     return { kol: typeof author === "string" && author.trim() ? author.trim().slice(0, 100) : parsed.user,
       asset: detectAsset(text), dir: detectDirection(text), entry: "", note: text.slice(0, 10000), sourceUrl: parsed.url };
   }
-  return { MAX_RECORDS, MAX_BACKUP_BYTES, MIN_SAMPLES, makeId, tweetUrl, normalize, parseRecords, mergeRecords, compute, parseTweet };
+  return { MAX_RECORDS, MAX_BACKUP_BYTES, MIN_SAMPLES, makeId, tweetUrl, normalize, parseRecords, mergeRecords, restoreRecords, compute, parseTweet };
 });
